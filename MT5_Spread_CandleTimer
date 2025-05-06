@@ -1,0 +1,266 @@
+//+------------------------------------------------------------------+
+//|                          MT5_Spread_CandleTimer.mq5               |
+//|                        Copyright 2025                             |
+//|                                                                   |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2025"
+#property link      ""
+#property version   "1.00"
+#property indicator_chart_window
+#property indicator_plots 0
+
+// Input parameters
+input color SpreadColor = clrRed;           // Spread text color
+input color TimerColor = clrLimeGreen;      // Timer text color
+input int TextSize = 10;                    // Text size
+input ENUM_BASE_CORNER Corner = CORNER_RIGHT_UPPER; // Text corner position
+input int XOffset = 10;                    // X offset from corner
+input int YOffset = 20;                    // Y offset from corner
+input bool ShowSpread = true;              // Show spread value
+input bool ShowTimer = true;               // Show candlestick timer
+input bool ShowMultiTimeframe = true;      // Show multi-timeframe info
+
+// Timeframes to monitor
+input bool Show_M1 = true;     // Show M1 timeframe
+input bool Show_M5 = true;     // Show M5 timeframe
+input bool Show_M15 = true;    // Show M15 timeframe
+input bool Show_M30 = true;    // Show M30 timeframe
+input bool Show_H1 = true;     // Show H1 timeframe
+input bool Show_H4 = true;     // Show H4 timeframe
+input bool Show_D1 = true;     // Show Daily timeframe
+input bool Show_W1 = false;    // Show Weekly timeframe
+input bool Show_MN1 = false;   // Show Monthly timeframe
+
+// Global variables
+long chartID;        // Chart ID - Changed from int to long
+string objPrefix;   // Object name prefix
+ENUM_TIMEFRAMES timeframes[9] = {
+   PERIOD_M1, PERIOD_M5, PERIOD_M15, PERIOD_M30, 
+   PERIOD_H1, PERIOD_H4, PERIOD_D1, PERIOD_W1, PERIOD_MN1
+};
+bool showTimeframes[9];
+string timeframeNames[9] = {"M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN1"};
+
+//+------------------------------------------------------------------+
+//| Custom indicator initialization function                         |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   // Initialize chart ID and object prefix
+   chartID = ChartID();  // ChartID() returns a long
+   objPrefix = "SpreadTimer_";
+   
+   // Initialize timeframe display settings
+   showTimeframes[0] = Show_M1;
+   showTimeframes[1] = Show_M5;
+   showTimeframes[2] = Show_M15;
+   showTimeframes[3] = Show_M30;
+   showTimeframes[4] = Show_H1;
+   showTimeframes[5] = Show_H4;
+   showTimeframes[6] = Show_D1;
+   showTimeframes[7] = Show_W1;
+   showTimeframes[8] = Show_MN1;
+   
+   // Set chart timer event
+   EventSetTimer(1);
+   
+   return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator deinitialization function                       |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   // Remove all created objects
+   ObjectsDeleteAll(chartID, objPrefix);
+   
+   // Kill timer
+   EventKillTimer();
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator iteration function                              |
+//+------------------------------------------------------------------+
+int OnCalculate(const int rates_total,
+                const int prev_calculated,
+                const datetime &time[],
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[])
+{
+   // This indicator uses timer events for updates
+   return(rates_total);
+}
+
+//+------------------------------------------------------------------+
+//| Timer function                                                   |
+//+------------------------------------------------------------------+
+void OnTimer()
+{
+   UpdateIndicator();
+}
+
+//+------------------------------------------------------------------+
+//| ChartEvent function                                              |
+//+------------------------------------------------------------------+
+void OnChartEvent(const int id,
+                  const long &lparam,
+                  const double &dparam,
+                  const string &sparam)
+{
+   // Update on window resize or properties change
+   if(id == CHARTEVENT_CHART_CHANGE)
+      UpdateIndicator();
+}
+
+//+------------------------------------------------------------------+
+//| Update indicator display                                         |
+//+------------------------------------------------------------------+
+void UpdateIndicator()
+{
+   // Delete all objects first
+   ObjectsDeleteAll(chartID, objPrefix);
+   
+   // Current chart timeframe
+   ENUM_TIMEFRAMES currentTF = Period();
+   
+   // Current spread
+   long currentSpread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double spreadInPoints = currentSpread * point;
+   
+   // Current time
+   datetime currentTime = TimeCurrent();
+   
+   // Base Y position
+   int yPos = YOffset;
+   
+   // Display current spread if enabled
+   if(ShowSpread)
+   {
+      string spreadText = "Spread: " + DoubleToString(spreadInPoints, _Digits) + " (" + IntegerToString(currentSpread) + " pts)";
+      CreateLabel(objPrefix + "Spread", spreadText, XOffset, yPos, SpreadColor);
+      yPos += 20;
+   }
+   
+   // Display candlestick timer for current chart if enabled
+   if(ShowTimer)
+   {
+      // Calculate time remaining until next candle
+      datetime nextCandleTime = GetNextCandleTime(currentTime, currentTF);
+      int secondsLeft = (int)(nextCandleTime - currentTime);
+      
+      // Format the time remaining
+      string timeLeft = FormatTimeLeft(secondsLeft);
+      string timerText = "Next " + GetTimeframeString(currentTF) + " candle: " + timeLeft;
+      
+      CreateLabel(objPrefix + "Timer", timerText, XOffset, yPos, TimerColor);
+      yPos += 20;
+   }
+   
+   // Display multi-timeframe information if enabled
+   if(ShowMultiTimeframe)
+   {
+      for(int i = 0; i < ArraySize(timeframes); i++)
+      {
+         if(!showTimeframes[i])
+            continue;
+            
+         // Skip current timeframe as it's already displayed
+         if(timeframes[i] == currentTF && ShowTimer)
+            continue;
+            
+         // Calculate time remaining for this timeframe
+         datetime nextTFCandleTime = GetNextCandleTime(currentTime, timeframes[i]);
+         int secondsLeftTF = (int)(nextTFCandleTime - currentTime);
+         
+         // Format the time remaining
+         string timeLeftTF = FormatTimeLeft(secondsLeftTF);
+         string tfTimerText = "Next " + timeframeNames[i] + " candle: " + timeLeftTF;
+         
+         CreateLabel(objPrefix + "Timer_" + timeframeNames[i], tfTimerText, XOffset, yPos, TimerColor);
+         yPos += 20;
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Create a text label on the chart                                 |
+//+------------------------------------------------------------------+
+void CreateLabel(string name, string text, int x, int y, color clr)
+{
+   if(ObjectFind(chartID, name) < 0)
+      ObjectCreate(chartID, name, OBJ_LABEL, 0, 0, 0);
+      
+   ObjectSetString(chartID, name, OBJPROP_TEXT, text);
+   ObjectSetInteger(chartID, name, OBJPROP_FONTSIZE, TextSize);
+   ObjectSetInteger(chartID, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(chartID, name, OBJPROP_CORNER, Corner);
+   ObjectSetInteger(chartID, name, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(chartID, name, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(chartID, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(chartID, name, OBJPROP_BACK, false);
+}
+
+//+------------------------------------------------------------------+
+//| Format time left in HH:MM:SS format                              |
+//+------------------------------------------------------------------+
+string FormatTimeLeft(int seconds)
+{
+   int h = seconds / 3600;
+   int m = (seconds % 3600) / 60;
+   int s = seconds % 60;
+   
+   return StringFormat("%02d:%02d:%02d", h, m, s);
+}
+
+//+------------------------------------------------------------------+
+//| Get next candle time for a specific timeframe                    |
+//+------------------------------------------------------------------+
+datetime GetNextCandleTime(datetime current, ENUM_TIMEFRAMES tf)
+{
+   datetime barTime = current;
+   
+   // Round down to the start of the current bar
+   barTime = datetime(MathFloor(double(barTime) / PeriodSeconds(tf)) * PeriodSeconds(tf));
+   
+   // Add one period to get the next candle time
+   return barTime + PeriodSeconds(tf);
+}
+
+//+------------------------------------------------------------------+
+//| Get string representation of timeframe                           |
+//+------------------------------------------------------------------+
+string GetTimeframeString(ENUM_TIMEFRAMES tf)
+{
+   switch(tf)
+   {
+      case PERIOD_M1:  return "M1";
+      case PERIOD_M2:  return "M2";
+      case PERIOD_M3:  return "M3";
+      case PERIOD_M4:  return "M4";
+      case PERIOD_M5:  return "M5";
+      case PERIOD_M6:  return "M6";
+      case PERIOD_M10: return "M10";
+      case PERIOD_M12: return "M12";
+      case PERIOD_M15: return "M15";
+      case PERIOD_M20: return "M20";
+      case PERIOD_M30: return "M30";
+      case PERIOD_H1:  return "H1";
+      case PERIOD_H2:  return "H2";
+      case PERIOD_H3:  return "H3";
+      case PERIOD_H4:  return "H4";
+      case PERIOD_H6:  return "H6";
+      case PERIOD_H8:  return "H8";
+      case PERIOD_H12: return "H12";
+      case PERIOD_D1:  return "D1";
+      case PERIOD_W1:  return "W1";
+      case PERIOD_MN1: return "MN1";
+      default:         return "Unknown";
+   }
+}
