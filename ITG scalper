@@ -1,0 +1,366 @@
+//+------------------------------------------------------------------+
+//|                                                   ITG_Scalper.mq5  |
+//|                                              Copyright 2025 GBN    |
+//|                                          ITG Scalper by Complector |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2025"
+#property link      ""
+#property version   "1.00"
+#property strict
+
+#include <Trade\Trade.mqh>
+CTrade Trade;
+
+// Input Parameters - General
+input group "Indicator Settings"
+input bool   InpPlotTEMA = true;        // Plot TEMA
+input bool   InpColorChange = true;      // Green/redshift on/off
+input bool   InpShowSignals = true;      // Show buy/sell signals
+input bool   InpUseLabels = true;        // Use labels (max 50)
+input bool   InpShowPercentage = false;  // Show % change since last buy/sell
+input bool   InpNoiseFilter = true;      // Noise filter on/off
+input bool   InpUseCurrentTF = true;     // Use Current Timeframe for filter
+input ENUM_TIMEFRAMES InpCustomTF = PERIOD_H1; // Custom timeframe for filter
+input int    InpTEMAPeriod = 14;        // TEMA period
+input int    InpFastLength = 12;        // Filter fast length
+input int    InpSlowLength = 26;        // Filter slow length
+input int    InpSignalLength = 9;       // Filter signal length
+
+// Trade Parameters
+input group "Trade Settings"
+input double InpLotSize = 0.01;         // Trading lot size
+input double InpRiskPerTrade = 5.0;     // Risk per trade in percentage
+input int    InpTakeProfit = 100;       // Take profit in pips
+input int    InpStopLoss = 20;          // Stop loss in pips
+input int    InpTrailingStart = 50;     // Start trailing at profit in pips
+input int    InpTrailingStop = 20;      // Trailing stop in pips
+input double InpMaxSpread = 3.0;        // Maximum allowed spread
+
+// Daily Limits
+input group "Risk Management"
+input double InpMaxDailyProfit = 150.0; // Maximum daily profit in USD
+input double InpMaxDailyLoss = 30.0;    // Maximum daily loss in USD
+
+// News Filter
+input group "News Filter"
+input bool   InpUseNewsFilter = true;   // Use news filter
+input int    InpMinutesBeforeNews = 30; // Minutes before news to pause
+input int    InpMinutesAfterNews = 20;  // Minutes after news to resume
+
+// Global Constants
+const int    MAGIC_NUMBER = 9276581;    // EA unique identifier
+const string EA_NAME = "ITG_Scalper";
+
+// Global Variables
+double g_buyPrice = 0;
+double g_sellPrice = 0;
+bool   g_lastTran = false;  // false = last was sell, true = last was buy
+double g_dailyProfit = 0;
+double g_tickSize;
+double g_tickValue;
+int    g_digitsMultiplier;
+
+// Indicator handles and buffers
+int g_emaHandle1;
+int g_emaHandle2;
+int g_emaHandle3;
+int g_macdHandle;
+
+double g_ema1[];
+double g_ema2[];
+double g_ema3[];
+double g_tema[];
+double g_macd[];
+double g_signal[];
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                      |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+    // Initialize arrays
+    ArraySetAsSeries(g_ema1, true);
+    ArraySetAsSeries(g_ema2, true);
+    ArraySetAsSeries(g_ema3, true);
+    ArraySetAsSeries(g_tema, true);
+    ArraySetAsSeries(g_macd, true);
+    ArraySetAsSeries(g_signal, true);
+    
+    // Calculate multiplier for point to pip conversion
+    g_digitsMultiplier = (int)MathPow(10, _Digits - 1);
+    g_tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+    g_tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+    
+    // Create indicator handles
+    g_emaHandle1 = iMA(_Symbol, PERIOD_CURRENT, InpTEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
+    g_emaHandle2 = iMA(_Symbol, PERIOD_CURRENT, InpTEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
+    g_emaHandle3 = iMA(_Symbol, PERIOD_CURRENT, InpTEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
+    g_macdHandle = iMACD(_Symbol, InpUseCurrentTF ? PERIOD_CURRENT : InpCustomTF,
+                        InpFastLength, InpSlowLength, InpSignalLength, PRICE_CLOSE);
+    
+    if(g_emaHandle1 == INVALID_HANDLE || g_emaHandle2 == INVALID_HANDLE || 
+       g_emaHandle3 == INVALID_HANDLE || g_macdHandle == INVALID_HANDLE)
+    {
+        Print("Error creating indicators!");
+        return INIT_FAILED;
+    }
+    
+    return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                   |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+    // Release indicator handles
+    IndicatorRelease(g_emaHandle1);
+    IndicatorRelease(g_emaHandle2);
+    IndicatorRelease(g_emaHandle3);
+    IndicatorRelease(g_macdHandle);
+    
+    // Clean up objects
+    ObjectsDeleteAll(0, EA_NAME);
+}
+
+//+------------------------------------------------------------------+
+//| Calculate TEMA value                                               |
+//+------------------------------------------------------------------+
+double CalculateTEMA(int shift)
+{
+    // Copy EMA values
+    CopyBuffer(g_emaHandle1, 0, shift, 1, g_ema1);
+    CopyBuffer(g_emaHandle2, 0, shift, 1, g_ema2);
+    CopyBuffer(g_emaHandle3, 0, shift, 1, g_ema3);
+    
+    // Calculate TEMA
+    return 3 * g_ema1[0] - 3 * g_ema2[0] + g_ema3[0];
+}
+
+//+------------------------------------------------------------------+
+//| Check if we can trade based on time and news                      |
+//+------------------------------------------------------------------+
+bool CanTrade()
+{
+    if(!MQLInfoInteger(MQL_TRADE_ALLOWED)) return false;
+    
+    datetime currentTime = TimeCurrent();
+    MqlDateTime dt;
+    TimeToStruct(currentTime, dt);
+    
+    // Check trading hours (assuming 24/5 market)
+    if(dt.day_of_week == 0 || dt.day_of_week == 6) return false;
+    
+    // Check spread
+    if(SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) > InpMaxSpread * g_digitsMultiplier)
+        return false;
+    
+    // Check daily limits
+    if(MathAbs(g_dailyProfit) > InpMaxDailyProfit || 
+       g_dailyProfit < -InpMaxDailyLoss) return false;
+    
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Calculate lot size based on risk                                   |
+//+------------------------------------------------------------------+
+double CalculateLotSize()
+{
+    double riskAmount = AccountInfoDouble(ACCOUNT_BALANCE) * InpRiskPerTrade / 100;
+    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+    double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+    
+    double lot = NormalizeDouble(riskAmount / (InpStopLoss * tickValue), 2);
+    lot = MathMax(lot, SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN));
+    lot = MathMin(lot, SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX));
+    
+    return NormalizeDouble(lot, 2);
+}
+
+//+------------------------------------------------------------------+
+//| Check for open positions                                          |
+//+------------------------------------------------------------------+
+bool HasOpenPosition()
+{
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        if(PositionGetSymbol(i) == _Symbol && 
+           PositionGetInteger(POSITION_MAGIC) == MAGIC_NUMBER)
+            return true;
+    }
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                               |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+    // Skip if we don't have enough bars
+    if(Bars(_Symbol, PERIOD_CURRENT) < 100) return;
+    
+    // Update TEMA and MACD values
+    double tema_current = CalculateTEMA(0);
+    double tema_prev = CalculateTEMA(1);
+    
+    double macdBuffer[], signalBuffer[];
+    ArraySetAsSeries(macdBuffer, true);
+    ArraySetAsSeries(signalBuffer, true);
+    
+    CopyBuffer(g_macdHandle, 0, 0, 2, macdBuffer);
+    CopyBuffer(g_macdHandle, 1, 0, 2, signalBuffer);
+    
+    // Calculate conditions
+    bool maUp = tema_current >= tema_prev;
+    bool maDown = tema_current < tema_prev;
+    bool maNeutral = maUp == maDown;
+    
+    bool filterBuy = !InpNoiseFilter || macdBuffer[0] >= signalBuffer[0];
+    bool filterSell = !InpNoiseFilter || macdBuffer[0] < signalBuffer[0];
+    
+    // Calculate entry conditions
+    bool longCondition = maUp && !g_lastTran && !maNeutral && filterBuy;
+    bool shortCondition = maDown && g_lastTran && !maNeutral && filterSell;
+    
+    // Check if we can trade
+    if(!CanTrade()) return;
+    
+    // Trading logic
+    if(!HasOpenPosition())
+    {
+        if(longCondition)
+        {
+            double lot = InpLotSize > 0 ? InpLotSize : CalculateLotSize();
+            double sl = SymbolInfoDouble(_Symbol, SYMBOL_ASK) - InpStopLoss * _Point * 10;
+            double tp = SymbolInfoDouble(_Symbol, SYMBOL_ASK) + InpTakeProfit * _Point * 10;
+            
+            if(Trade.Buy(lot, _Symbol, 0, sl, tp, EA_NAME))
+            {
+                g_buyPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+                g_lastTran = true;
+            }
+        }
+        else if(shortCondition)
+        {
+            double lot = InpLotSize > 0 ? InpLotSize : CalculateLotSize();
+            double sl = SymbolInfoDouble(_Symbol, SYMBOL_BID) + InpStopLoss * _Point * 10;
+            double tp = SymbolInfoDouble(_Symbol, SYMBOL_BID) - InpTakeProfit * _Point * 10;
+            
+            if(Trade.Sell(lot, _Symbol, 0, sl, tp, EA_NAME))
+            {
+                g_sellPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+                g_lastTran = false;
+            }
+        }
+    }
+    
+    // Update trailing stops
+    UpdateTrailingStops();
+    
+    // Update daily profit
+    CalculateDailyProfit();
+    
+    // Draw indicators if needed
+    if(InpPlotTEMA)
+    {
+        DrawTEMA(tema_current, maUp);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Update trailing stops for open positions                           |
+//+------------------------------------------------------------------+
+void UpdateTrailingStops()
+{
+    if(InpTrailingStart <= 0 || InpTrailingStop <= 0) return;
+    
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        if(PositionGetSymbol(i) == _Symbol && 
+           PositionGetInteger(POSITION_MAGIC) == MAGIC_NUMBER)
+        {
+            ulong ticket = PositionGetTicket(i);
+            double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+            double currentPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
+            double currentSL = PositionGetDouble(POSITION_SL);
+            
+            if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+            {
+                double newSL = currentPrice - InpTrailingStop * _Point * 10;
+                if(currentPrice - openPrice > InpTrailingStart * _Point * 10 &&
+                   (currentSL == 0 || newSL > currentSL))
+                {
+                    Trade.PositionModify(ticket, newSL, PositionGetDouble(POSITION_TP));
+                }
+            }
+            else // POSITION_TYPE_SELL
+            {
+                double newSL = currentPrice + InpTrailingStop * _Point * 10;
+                if(openPrice - currentPrice > InpTrailingStart * _Point * 10 &&
+                   (currentSL == 0 || newSL < currentSL))
+                {
+                    Trade.PositionModify(ticket, newSL, PositionGetDouble(POSITION_TP));
+                }
+            }
+            break;
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Calculate daily profit                                            |
+//+------------------------------------------------------------------+
+void CalculateDailyProfit()
+{
+    g_dailyProfit = 0;
+    
+    // Calculate profit from open positions
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        if(PositionGetSymbol(i) == _Symbol && 
+           PositionGetInteger(POSITION_MAGIC) == MAGIC_NUMBER)
+        {
+            g_dailyProfit += PositionGetDouble(POSITION_PROFIT);
+        }
+    }
+    
+    // Add closed positions profit for today
+    MqlDateTime today;
+    TimeToStruct(TimeCurrent(), today);
+    today.hour = 0;
+    today.min = 0;
+    today.sec = 0;
+    datetime startOfDay = StructToTime(today);
+    
+    HistorySelect(startOfDay, TimeCurrent());
+    
+    for(int i = 0; i < HistoryDealsTotal(); i++)
+    {
+        ulong ticket = HistoryDealGetTicket(i);
+        if(HistoryDealGetString(ticket, DEAL_SYMBOL) == _Symbol && 
+           HistoryDealGetInteger(ticket, DEAL_MAGIC) == MAGIC_NUMBER)
+        {
+            g_dailyProfit += HistoryDealGetDouble(ticket, DEAL_PROFIT);
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Draw TEMA on the chart                                            |
+//+------------------------------------------------------------------+
+void DrawTEMA(double temaValue, bool isUp)
+{
+    string objectName = EA_NAME + "_TEMA";
+    datetime time1 = iTime(_Symbol, PERIOD_CURRENT, 1);
+    datetime time0 = iTime(_Symbol, PERIOD_CURRENT, 0);
+    
+    if(ObjectFind(0, objectName) >= 0)
+        ObjectDelete(0, objectName);
+        
+    ObjectCreate(0, objectName, OBJ_TREND, 0, time1, temaValue, time0, temaValue);
+    ObjectSetInteger(0, objectName, OBJPROP_COLOR, 
+                    InpColorChange ? (isUp ? clrLime : clrRed) : clrAqua);
+    ObjectSetInteger(0, objectName, OBJPROP_WIDTH, 2);
+    ObjectSetInteger(0, objectName, OBJPROP_RAY_RIGHT, false);
+}
