@@ -1,0 +1,576 @@
+//+------------------------------------------------------------------+
+//|                                     Advanced_Reversal_Points.mq5 |
+//|                                  Copyright 2025, Reversal Expert |
+//|                                             https://www.mql5.com |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2025, Reversal Expert"
+#property link      "https://www.mql5.com"
+#property version   "1.00"
+#property indicator_chart_window
+#property indicator_buffers 10
+#property indicator_plots   2
+
+// Indicator buffers for arrows
+#property indicator_label1  "Buy Signal"
+#property indicator_type1   DRAW_ARROW
+#property indicator_color1  clrLime
+#property indicator_style1  STYLE_SOLID
+#property indicator_width1  3
+
+#property indicator_label2  "Sell Signal"
+#property indicator_type2   DRAW_ARROW
+#property indicator_color2  clrRed
+#property indicator_style2  STYLE_SOLID
+#property indicator_width2  3
+
+// Input parameters
+input int RSI_Period = 14;              // RSI Period
+input int RSI_OverBought = 70;          // RSI Overbought level
+input int RSI_OverSold = 30;            // RSI Oversold level
+input int MACD_Fast = 12;               // MACD Fast EMA
+input int MACD_Slow = 26;               // MACD Slow EMA
+input int MACD_Signal = 9;              // MACD Signal period
+input int Stoch_K = 14;                 // Stochastic %K
+input int Stoch_D = 3;                  // Stochastic %D
+input int Stoch_Slowing = 3;            // Stochastic slowing
+input int Stoch_OverBought = 80;        // Stochastic overbought
+input int Stoch_OverSold = 20;          // Stochastic oversold
+input int MA_Period = 200;              // Moving Average period
+input ENUM_MA_METHOD MA_Method = MODE_SMA; // Moving Average method
+input int ATR_Period = 14;              // ATR Period for volatility
+input int Fib_Lookback = 20;            // Bars to look back for Fibonacci
+input double VolumeTrigger = 1.5;       // Volume trigger multiplier
+input int Candle_Patterns = 1;          // Use candle patterns (0-no, 1-yes)
+input int Divergence_Check = 1;         // Check for divergence (0-no, 1-yes)
+input int Minimum_Conditions = 3;       // Minimum conditions to trigger signal
+input int Signal_Lookback = 10;         // Bars between signals
+
+// Multi-timeframe settings
+input bool Use_Multi_Timeframe = true;  // Use multi-timeframe analysis
+input ENUM_TIMEFRAMES Higher_Timeframe = PERIOD_H1; // Higher timeframe to check
+input ENUM_TIMEFRAMES Lower_Timeframe = PERIOD_M5;  // Lower timeframe to check
+input double Multi_TF_Weight = 2.0;     // Weight for multi-timeframe confirmations
+
+// Indicator buffers
+double BuyBuffer[];
+double SellBuffer[];
+double RSIBuffer[];
+double MACDBuffer[];
+double SignalBuffer[];
+double StochKBuffer[];
+double StochDBuffer[];
+double MABuffer[];
+double HigherTFBuffer[];
+double LowerTFBuffer[];
+
+// Handles for indicators
+int RSIHandle, MACDHandle, StochHandle, MAHandle, ATRHandle;
+int HigherRSIHandle, HigherMACDHandle, HigherStochHandle;
+int LowerRSIHandle, LowerMACDHandle, LowerStochHandle;
+
+// Additional variables
+int lastSignalBar = 0;
+bool firstRun = true;
+double priorHighs[], priorLows[];
+double AvgVolume;
+
+//+------------------------------------------------------------------+
+//| Custom indicator initialization function                         |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   // Set up the buffers
+   SetIndexBuffer(0, BuyBuffer, INDICATOR_DATA);
+   SetIndexBuffer(1, SellBuffer, INDICATOR_DATA);
+   SetIndexBuffer(2, RSIBuffer, INDICATOR_CALCULATIONS);
+   SetIndexBuffer(3, MACDBuffer, INDICATOR_CALCULATIONS);
+   SetIndexBuffer(4, SignalBuffer, INDICATOR_CALCULATIONS);
+   SetIndexBuffer(5, StochKBuffer, INDICATOR_CALCULATIONS);
+   SetIndexBuffer(6, StochDBuffer, INDICATOR_CALCULATIONS);
+   SetIndexBuffer(7, MABuffer, INDICATOR_CALCULATIONS);
+   SetIndexBuffer(8, HigherTFBuffer, INDICATOR_CALCULATIONS);
+   SetIndexBuffer(9, LowerTFBuffer, INDICATOR_CALCULATIONS);
+   
+   // Set arrow codes
+   PlotIndexSetInteger(0, PLOT_ARROW, 233); // Up arrow for buy
+   PlotIndexSetInteger(1, PLOT_ARROW, 234); // Down arrow for sell
+   
+   // Initialize indicators on current timeframe
+   RSIHandle = iRSI(NULL, 0, RSI_Period, PRICE_CLOSE);
+   MACDHandle = iMACD(NULL, 0, MACD_Fast, MACD_Slow, MACD_Signal, PRICE_CLOSE);
+   StochHandle = iStochastic(NULL, 0, Stoch_K, Stoch_D, Stoch_Slowing, MODE_SMA, STO_LOWHIGH);
+   MAHandle = iMA(NULL, 0, MA_Period, 0, MA_Method, PRICE_CLOSE);
+   ATRHandle = iATR(NULL, 0, ATR_Period);
+   
+   // Initialize indicators on higher timeframe
+   if(Use_Multi_Timeframe)
+   {
+      HigherRSIHandle = iRSI(NULL, Higher_Timeframe, RSI_Period, PRICE_CLOSE);
+      HigherMACDHandle = iMACD(NULL, Higher_Timeframe, MACD_Fast, MACD_Slow, MACD_Signal, PRICE_CLOSE);
+      HigherStochHandle = iStochastic(NULL, Higher_Timeframe, Stoch_K, Stoch_D, Stoch_Slowing, MODE_SMA, STO_LOWHIGH);
+      
+      // Initialize indicators on lower timeframe
+      LowerRSIHandle = iRSI(NULL, Lower_Timeframe, RSI_Period, PRICE_CLOSE);
+      LowerMACDHandle = iMACD(NULL, Lower_Timeframe, MACD_Fast, MACD_Slow, MACD_Signal, PRICE_CLOSE);
+      LowerStochHandle = iStochastic(NULL, Lower_Timeframe, Stoch_K, Stoch_D, Stoch_Slowing, MODE_SMA, STO_LOWHIGH);
+   }
+   
+   // Allocate memory for prior highs/lows
+   ArrayResize(priorHighs, Fib_Lookback);
+   ArrayResize(priorLows, Fib_Lookback);
+   
+   // Set indicator name
+   IndicatorSetString(INDICATOR_SHORTNAME, "Advanced Reversal Points");
+   
+   return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator iteration function                              |
+//+------------------------------------------------------------------+
+int OnCalculate(const int rates_total,
+                const int prev_calculated,
+                const datetime &time[],
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[])
+{
+   // Check if we have enough bars to calculate
+   if(rates_total < MA_Period + 50) return(0);
+   
+   // Define the calculation start point
+   int start;
+   if(prev_calculated == 0)
+   {
+      start = MA_Period + 50;
+      // Clear buffers
+      ArrayInitialize(BuyBuffer, EMPTY_VALUE);
+      ArrayInitialize(SellBuffer, EMPTY_VALUE);
+   }
+   else
+   {
+      start = prev_calculated - 1;
+   }
+   
+   // Copy indicator data
+   if(CopyBuffer(RSIHandle, 0, 0, rates_total, RSIBuffer) <= 0) return(0);
+   if(CopyBuffer(MACDHandle, 0, 0, rates_total, MACDBuffer) <= 0) return(0);
+   if(CopyBuffer(MACDHandle, 1, 0, rates_total, SignalBuffer) <= 0) return(0);
+   if(CopyBuffer(StochHandle, 0, 0, rates_total, StochKBuffer) <= 0) return(0);
+   if(CopyBuffer(StochHandle, 1, 0, rates_total, StochDBuffer) <= 0) return(0);
+   if(CopyBuffer(MAHandle, 0, 0, rates_total, MABuffer) <= 0) return(0);
+   
+   // Calculate average volume for last 20 bars
+   double volSum = 0;
+   for(int i = 1; i <= 20; i++)
+   {
+      // Explicit casting to avoid loss of data warning
+      volSum += (double)tick_volume[rates_total - i];
+   }
+   AvgVolume = volSum / 20;
+   
+   // Main calculation loop
+   for(int i = start; i < rates_total; i++)
+   {
+      // Initialize signal buffers to EMPTY_VALUE
+      BuyBuffer[i] = EMPTY_VALUE;
+      SellBuffer[i] = EMPTY_VALUE;
+      
+      // Skip bars too close to the last signal
+      if(i - lastSignalBar < Signal_Lookback) continue;
+      
+      // Count buy and sell conditions
+      double buyConditions = 0;
+      double sellConditions = 0;
+      
+      //------------------------------------------------------------------
+      // Multi-timeframe analysis
+      //------------------------------------------------------------------
+      if(Use_Multi_Timeframe)
+      {
+         // Get current bar's datetime
+         datetime barTime = time[i];
+         
+         // Check higher timeframe conditions
+         CheckHigherTimeframeConditions(barTime, buyConditions, sellConditions);
+         
+         // Check lower timeframe conditions
+         CheckLowerTimeframeConditions(barTime, buyConditions, sellConditions);
+      }
+      
+      //------------------------------------------------------------------
+      // 1. RSI Conditions
+      //------------------------------------------------------------------
+      // Oversold conditions for buy
+      if(RSIBuffer[i] < RSI_OverSold && RSIBuffer[i-1] < RSIBuffer[i]) buyConditions++;
+      // Overbought conditions for sell
+      if(RSIBuffer[i] > RSI_OverBought && RSIBuffer[i-1] > RSIBuffer[i]) sellConditions++;
+      
+      //------------------------------------------------------------------
+      // 2. MACD Conditions
+      //------------------------------------------------------------------
+      // MACD cross above signal line
+      if(MACDBuffer[i] > SignalBuffer[i] && MACDBuffer[i-1] <= SignalBuffer[i-1]) buyConditions++;
+      // MACD cross below signal line
+      if(MACDBuffer[i] < SignalBuffer[i] && MACDBuffer[i-1] >= SignalBuffer[i-1]) sellConditions++;
+      
+      //------------------------------------------------------------------
+      // 3. Stochastic Conditions
+      //------------------------------------------------------------------
+      // Stochastic oversold and turning up
+      if(StochKBuffer[i] < Stoch_OverSold && StochKBuffer[i] > StochDBuffer[i] 
+         && StochKBuffer[i-1] <= StochDBuffer[i-1]) buyConditions++;
+      // Stochastic overbought and turning down
+      if(StochKBuffer[i] > Stoch_OverBought && StochKBuffer[i] < StochDBuffer[i] 
+         && StochKBuffer[i-1] >= StochDBuffer[i-1]) sellConditions++;
+      
+      //------------------------------------------------------------------
+      // 4. Moving Average Conditions
+      //------------------------------------------------------------------
+      // Price crossing above MA
+      if(close[i] > MABuffer[i] && close[i-1] <= MABuffer[i-1]) buyConditions++;
+      // Price crossing below MA
+      if(close[i] < MABuffer[i] && close[i-1] >= MABuffer[i-1]) sellConditions++;
+      
+      //------------------------------------------------------------------
+      // 5. Support/Resistance & Fibonacci Levels
+      //------------------------------------------------------------------
+      // Find recent swing highs and lows
+      FindSwings(high, low, i, priorHighs, priorLows);
+      
+      // Check if current price is at a key support/resistance
+      bool atSupport = false;
+      bool atResistance = false;
+      double fibLevels[5] = {0.236, 0.382, 0.5, 0.618, 0.786};
+      
+      // Find highest high and lowest low in the lookback period
+      double highestHigh = high[ArrayMaximum(high, i-Fib_Lookback, Fib_Lookback)];
+      double lowestLow = low[ArrayMinimum(low, i-Fib_Lookback, Fib_Lookback)];
+      
+      // Check if price is near Fibonacci levels
+      for(int f=0; f<5; f++)
+      {
+         double fibLevel = lowestLow + (highestHigh - lowestLow) * fibLevels[f];
+         // If price is near a Fibonacci retracement level
+         if(MathAbs(close[i] - fibLevel) < (high[i] - low[i]) * 0.5)
+         {
+            if(close[i] > close[i-1]) buyConditions++; // Price bouncing from support
+            if(close[i] < close[i-1]) sellConditions++; // Price bouncing from resistance
+            break;
+         }
+      }
+      
+      // Check prior swing points
+      for(int j=0; j<Fib_Lookback; j++)
+      {
+         // Price near previous low (potential support)
+         if(priorLows[j] > 0 && MathAbs(low[i] - priorLows[j]) < (high[i] - low[i]))
+         {
+            atSupport = true;
+            if(close[i] > open[i]) buyConditions++; // Bullish candle at support
+            break;
+         }
+         
+         // Price near previous high (potential resistance)
+         if(priorHighs[j] > 0 && MathAbs(high[i] - priorHighs[j]) < (high[i] - low[i]))
+         {
+            atResistance = true;
+            if(close[i] < open[i]) sellConditions++; // Bearish candle at resistance
+            break;
+         }
+      }
+      
+      //------------------------------------------------------------------
+      // 6. Volume Analysis
+      //------------------------------------------------------------------
+      if((double)tick_volume[i] > AvgVolume * VolumeTrigger)
+      {
+         if(close[i] > open[i]) buyConditions++;  // Higher volume on up candle
+         if(close[i] < open[i]) sellConditions++; // Higher volume on down candle
+      }
+      
+      // Volume divergence (price up, volume down = bearish)
+      if(close[i] > close[i-1] && (double)tick_volume[i] < (double)tick_volume[i-1] && 
+         close[i-1] > close[i-2] && (double)tick_volume[i-1] < (double)tick_volume[i-2])
+      {
+         sellConditions++;
+      }
+      
+      // Volume divergence (price down, volume down = bullish)
+      if(close[i] < close[i-1] && (double)tick_volume[i] < (double)tick_volume[i-1] && 
+         close[i-1] < close[i-2] && (double)tick_volume[i-1] < (double)tick_volume[i-2])
+      {
+         buyConditions++;
+      }
+      
+      //------------------------------------------------------------------
+      // 7. Candlestick Patterns (if enabled)
+      //------------------------------------------------------------------
+      if(Candle_Patterns == 1)
+      {
+         // Bullish patterns
+         if(IsBullishEngulfing(open, close, i)) buyConditions++;
+         if(IsBullishHammer(open, high, low, close, i)) buyConditions++;
+         if(IsMorningStar(open, high, low, close, i)) buyConditions += 2; // Stronger pattern
+         
+         // Bearish patterns
+         if(IsBearishEngulfing(open, close, i)) sellConditions++;
+         if(IsBearishShooting(open, high, low, close, i)) sellConditions++;
+         if(IsEveningStar(open, high, low, close, i)) sellConditions += 2; // Stronger pattern
+      }
+      
+      //------------------------------------------------------------------
+      // 8. Divergence (if enabled)
+      //------------------------------------------------------------------
+      if(Divergence_Check == 1)
+      {
+         // Bullish divergence (price making lower lows, RSI making higher lows)
+         if(low[i] < low[i-2] && RSIBuffer[i] > RSIBuffer[i-2] && low[i] < low[i-1])
+         {
+            buyConditions += 2; // Strong signal
+         }
+         
+         // Bearish divergence (price making higher highs, RSI making lower highs)
+         if(high[i] > high[i-2] && RSIBuffer[i] < RSIBuffer[i-2] && high[i] > high[i-1])
+         {
+            sellConditions += 2; // Strong signal
+         }
+      }
+      
+      //------------------------------------------------------------------
+      // Generate signals based on conditions
+      //------------------------------------------------------------------
+      
+      // BUY Signal - Convert to integer for comparison with minimum conditions
+      if((int)buyConditions >= Minimum_Conditions)
+      {
+         BuyBuffer[i] = low[i] - (high[i] - low[i]) * 0.2; // Place arrow below the candle
+         lastSignalBar = i;
+      }
+      
+      // SELL Signal - Convert to integer for comparison with minimum conditions
+      if((int)sellConditions >= Minimum_Conditions)
+      {
+         SellBuffer[i] = high[i] + (high[i] - low[i]) * 0.2; // Place arrow above the candle
+         lastSignalBar = i;
+      }
+   }
+   
+   return(rates_total);
+}
+
+//+------------------------------------------------------------------+
+//| Find swing highs and lows                                        |
+//+------------------------------------------------------------------+
+void FindSwings(const double &high[], const double &low[], int currentBar, double &swingHighs[], double &swingLows[])
+{
+   // Reset arrays
+   ArrayInitialize(swingHighs, 0);
+   ArrayInitialize(swingLows, 0);
+   
+   int highCount = 0, lowCount = 0;
+   
+   // Look back for swing points
+   for(int i = currentBar-2; i > currentBar-Fib_Lookback-2 && i > 2; i--)
+   {
+      // Check for swing high (higher than 2 bars before and 2 bars after)
+      if(high[i] > high[i-1] && high[i] > high[i-2] && high[i] > high[i+1] && high[i] > high[i+2])
+      {
+         swingHighs[highCount++] = high[i];
+         if(highCount >= Fib_Lookback) break;
+      }
+      
+      // Check for swing low (lower than 2 bars before and 2 bars after)
+      if(low[i] < low[i-1] && low[i] < low[i-2] && low[i] < low[i+1] && low[i] < low[i+2])
+      {
+         swingLows[lowCount++] = low[i];
+         if(lowCount >= Fib_Lookback) break;
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Candlestick Pattern Recognition Functions                        |
+//+------------------------------------------------------------------+
+
+// Bullish Engulfing
+bool IsBullishEngulfing(const double &open[], const double &close[], int bar)
+{
+   return (close[bar] > open[bar] &&          // Current candle is bullish
+           open[bar] < close[bar-1] &&        // Current open below prior close
+           close[bar] > open[bar-1] &&        // Current close above prior open
+           open[bar-1] > close[bar-1]);       // Prior candle is bearish
+}
+
+// Bearish Engulfing
+bool IsBearishEngulfing(const double &open[], const double &close[], int bar)
+{
+   return (close[bar] < open[bar] &&          // Current candle is bearish
+           open[bar] > close[bar-1] &&        // Current open above prior close
+           close[bar] < open[bar-1] &&        // Current close below prior open
+           open[bar-1] < close[bar-1]);       // Prior candle is bullish
+}
+
+// Bullish Hammer
+bool IsBullishHammer(const double &open[], const double &high[], const double &low[], const double &close[], int bar)
+{
+   double body = MathAbs(open[bar] - close[bar]);
+   double lowShadow = MathMin(open[bar], close[bar]) - low[bar];
+   double highShadow = high[bar] - MathMax(open[bar], close[bar]);
+   
+   return (lowShadow > 2 * body &&            // Long lower shadow
+           highShadow < body * 0.5 &&         // Small or no upper shadow
+           close[bar] > open[bar]);           // Bullish candle
+}
+
+// Bearish Shooting Star
+bool IsBearishShooting(const double &open[], const double &high[], const double &low[], const double &close[], int bar)
+{
+   double body = MathAbs(open[bar] - close[bar]);
+   double lowShadow = MathMin(open[bar], close[bar]) - low[bar];
+   double highShadow = high[bar] - MathMax(open[bar], close[bar]);
+   
+   return (highShadow > 2 * body &&           // Long upper shadow
+           lowShadow < body * 0.5 &&          // Small or no lower shadow
+           close[bar] < open[bar]);           // Bearish candle
+}
+
+// Morning Star Pattern
+bool IsMorningStar(const double &open[], const double &high[], const double &low[], const double &close[], int bar)
+{
+   // First candle: bearish with large body
+   bool firstCond = close[bar-2] < open[bar-2] && 
+                    MathAbs(open[bar-2] - close[bar-2]) > (high[bar-2] - low[bar-2]) * 0.6;
+   
+   // Second candle: small body
+   bool secondCond = MathAbs(open[bar-1] - close[bar-1]) < (high[bar-1] - low[bar-1]) * 0.3;
+   
+   // Third candle: bullish with large body, closing above midpoint of first candle
+   bool thirdCond = close[bar] > open[bar] && 
+                    close[bar] > open[bar-2] - (open[bar-2] - close[bar-2]) * 0.5;
+   
+   return firstCond && secondCond && thirdCond;
+}
+
+// Evening Star Pattern
+bool IsEveningStar(const double &open[], const double &high[], const double &low[], const double &close[], int bar)
+{
+   // First candle: bullish with large body
+   bool firstCond = close[bar-2] > open[bar-2] && 
+                    MathAbs(open[bar-2] - close[bar-2]) > (high[bar-2] - low[bar-2]) * 0.6;
+   
+   // Second candle: small body
+   bool secondCond = MathAbs(open[bar-1] - close[bar-1]) < (high[bar-1] - low[bar-1]) * 0.3;
+   
+   // Third candle: bearish with large body, closing below midpoint of first candle
+   bool thirdCond = close[bar] < open[bar] && 
+                    close[bar] < close[bar-2] - (close[bar-2] - open[bar-2]) * 0.5;
+   
+   return firstCond && secondCond && thirdCond;
+}
+
+//+------------------------------------------------------------------+
+//| Multi-timeframe analysis functions                              |
+//+------------------------------------------------------------------+
+
+// Check conditions on the higher timeframe
+void CheckHigherTimeframeConditions(datetime barTime, double &buyConditions, double &sellConditions)
+{
+   // Arrays for indicator values
+   double higherRSI[], higherMACD[], higherSignal[], higherStochK[], higherStochD[];
+   
+   // Find the corresponding bar in the higher timeframe
+   int higherTFBar = iBarShift(NULL, Higher_Timeframe, barTime);
+   
+   // Copy data from higher timeframe indicators
+   if(CopyBuffer(HigherRSIHandle, 0, higherTFBar, 3, higherRSI) <= 0) return;
+   if(CopyBuffer(HigherMACDHandle, 0, higherTFBar, 3, higherMACD) <= 0) return;
+   if(CopyBuffer(HigherMACDHandle, 1, higherTFBar, 3, higherSignal) <= 0) return;
+   if(CopyBuffer(HigherStochHandle, 0, higherTFBar, 3, higherStochK) <= 0) return;
+   if(CopyBuffer(HigherStochHandle, 1, higherTFBar, 3, higherStochD) <= 0) return;
+   
+   // RSI conditions on higher timeframe
+   if(higherRSI[0] < RSI_OverSold && higherRSI[1] < higherRSI[0])
+      buyConditions += Multi_TF_Weight;
+   
+   if(higherRSI[0] > RSI_OverBought && higherRSI[1] > higherRSI[0])
+      sellConditions += Multi_TF_Weight;
+   
+   // MACD conditions on higher timeframe
+   if(higherMACD[0] > higherSignal[0] && higherMACD[1] <= higherSignal[1])
+      buyConditions += Multi_TF_Weight;
+   
+   if(higherMACD[0] < higherSignal[0] && higherMACD[1] >= higherSignal[1])
+      sellConditions += Multi_TF_Weight;
+   
+   // Stochastic conditions on higher timeframe
+   if(higherStochK[0] < Stoch_OverSold && higherStochK[0] > higherStochD[0] && higherStochK[1] <= higherStochD[1])
+      buyConditions += Multi_TF_Weight;
+   
+   if(higherStochK[0] > Stoch_OverBought && higherStochK[0] < higherStochD[0] && higherStochK[1] >= higherStochD[1])
+      sellConditions += Multi_TF_Weight;
+}
+
+// Check conditions on the lower timeframe
+void CheckLowerTimeframeConditions(datetime barTime, double &buyConditions, double &sellConditions)
+{
+   // Arrays for indicator values
+   double lowerRSI[], lowerMACD[], lowerSignal[], lowerStochK[], lowerStochD[];
+   
+   // We need to find multiple bars in the lower timeframe that correspond to the current bar
+   datetime nextBarTime = barTime + PeriodSeconds();
+   
+   // Count lower timeframe conditions
+   int lowerBuyCount = 0;
+   int lowerSellCount = 0;
+   int totalBars = 0;
+   
+   // Loop through bars in the lower timeframe that correspond to this bar
+   for(datetime t = barTime; t < nextBarTime; t += PeriodSeconds(Lower_Timeframe))
+   {
+      int lowerTFBar = iBarShift(NULL, Lower_Timeframe, t);
+      if(lowerTFBar < 0) continue;
+      
+      // Copy data from lower timeframe indicators
+      if(CopyBuffer(LowerRSIHandle, 0, lowerTFBar, 3, lowerRSI) <= 0) continue;
+      if(CopyBuffer(LowerMACDHandle, 0, lowerTFBar, 3, lowerMACD) <= 0) continue;
+      if(CopyBuffer(LowerMACDHandle, 1, lowerTFBar, 3, lowerSignal) <= 0) continue;
+      if(CopyBuffer(LowerStochHandle, 0, lowerTFBar, 3, lowerStochK) <= 0) continue;
+      if(CopyBuffer(LowerStochHandle, 1, lowerTFBar, 3, lowerStochD) <= 0) continue;
+      
+      totalBars++;
+      
+      // Check for buy signals in lower timeframe
+      if(lowerRSI[0] < RSI_OverSold || 
+         (lowerMACD[0] > lowerSignal[0] && lowerMACD[1] <= lowerSignal[1]) ||
+         (lowerStochK[0] < Stoch_OverSold && lowerStochK[0] > lowerStochD[0]))
+      {
+         lowerBuyCount++;
+      }
+      
+      // Check for sell signals in lower timeframe
+      if(lowerRSI[0] > RSI_OverBought || 
+         (lowerMACD[0] < lowerSignal[0] && lowerMACD[1] >= lowerSignal[1]) ||
+         (lowerStochK[0] > Stoch_OverBought && lowerStochK[0] < lowerStochD[0]))
+      {
+         lowerSellCount++;
+      }
+   }
+   
+   // Only add conditions if we found some bars
+   if(totalBars > 0)
+   {
+      // If majority of lower timeframe bars show buy signals
+      if(lowerBuyCount > totalBars / 2)
+         buyConditions += Multi_TF_Weight * 0.5; // Lower weight for lower timeframe
+      
+      // If majority of lower timeframe bars show sell signals
+      if(lowerSellCount > totalBars / 2)
+         sellConditions += Multi_TF_Weight * 0.5; // Lower weight for lower timeframe
+   }
+}
+//+------------------------------------------------------------------+
