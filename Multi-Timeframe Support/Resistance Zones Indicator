@@ -1,0 +1,344 @@
+//+------------------------------------------------------------------+
+//|              Multi-Timeframe Support/Resistance Zones Indicator |
+//|                                     Copyright 2025, Your Name   |
+//|                                             https://www.mql5.com |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2025"
+#property link      "https://www.mql5.com"
+#property version   "1.00"
+#property indicator_chart_window
+#property indicator_buffers 0
+#property indicator_plots   0
+
+// Input parameters
+input bool   Show_SR = true;           // Show Support/Resistance
+input bool   Show_Strong_Zones = true; // Show Strong Zones
+input color  ResistanceColor = clrRed;  // Resistance Line Color
+input color  SupportColor = clrGreen;   // Support Line Color
+input color  PivotColor = clrYellow;    // Pivot Line Color
+input color  StrongZoneColor = clrOrange; // Strong Zone Color
+input int    ZoneOpacity = 30;          // Zone Opacity (0-255)
+input int    LookbackPeriod = 50;       // Lookback Period
+input bool   Show_HTF = true;           // Show Higher Timeframe Levels
+input ENUM_TIMEFRAMES HTF1 = PERIOD_H4; // Higher Timeframe 1
+input ENUM_TIMEFRAMES HTF2 = PERIOD_D1; // Higher Timeframe 2
+
+// Global variables
+double g_high_points[];
+double g_low_points[];
+int g_zone_count = 0;
+string g_prefix = "SR_MTF_";
+
+// Structure to hold zone information
+struct Zone {
+   double price;
+   int strength;
+   int hits;
+   bool isSupport;
+};
+
+//+------------------------------------------------------------------+
+//| Custom indicator initialization function                         |
+//+------------------------------------------------------------------+
+int OnInit() {
+   // Initialize arrays
+   ArrayResize(g_high_points, LookbackPeriod);
+   ArrayResize(g_low_points, LookbackPeriod);
+   
+   return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator deinitialization function                       |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason) {
+   // Remove all objects created by this indicator
+   ObjectsDeleteAll(0, g_prefix);
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator iteration function                              |
+//+------------------------------------------------------------------+
+int OnCalculate(const int rates_total,
+                const int prev_calculated,
+                const datetime &time[],
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[]) {
+   
+   // Exit if there are not enough bars
+   if(rates_total < LookbackPeriod) return(0);
+   
+   // Clear old levels
+   if(prev_calculated == 0) {
+      ObjectsDeleteAll(0, g_prefix);
+   }
+   
+   if(Show_SR) {
+      // Draw current timeframe SR levels
+      DrawSupportResistance(high, low, close);
+      
+      // Identify and draw strong zones
+      if(Show_Strong_Zones) {
+         IdentifyStrongZones(high, low);
+      }
+      
+      // Draw higher timeframe levels
+      if(Show_HTF) {
+         DrawHigherTimeframeLevels();
+      }
+   }
+   
+   return(rates_total);
+}
+
+//+------------------------------------------------------------------+
+//| Draw Support & Resistance Levels                                 |
+//+------------------------------------------------------------------+
+void DrawSupportResistance(const double &high[], const double &low[], const double &close[]) {
+   double current_high = high[iHighest(NULL, 0, MODE_HIGH, LookbackPeriod, 0)];
+   double current_low = low[iLowest(NULL, 0, MODE_LOW, LookbackPeriod, 0)];
+   double current_close = close[0];
+   
+   // Draw Resistance
+   string res_name = g_prefix + "Resistance_Current";
+   ObjectCreate(0, res_name, OBJ_HLINE, 0, 0, current_high);
+   ObjectSetInteger(0, res_name, OBJPROP_COLOR, ResistanceColor);
+   ObjectSetInteger(0, res_name, OBJPROP_WIDTH, 2);
+   ObjectSetInteger(0, res_name, OBJPROP_STYLE, STYLE_SOLID);
+   ObjectSetString(0, res_name, OBJPROP_TOOLTIP, "Current Resistance: " + DoubleToString(current_high, _Digits));
+   
+   // Draw Support
+   string sup_name = g_prefix + "Support_Current";
+   ObjectCreate(0, sup_name, OBJ_HLINE, 0, 0, current_low);
+   ObjectSetInteger(0, sup_name, OBJPROP_COLOR, SupportColor);
+   ObjectSetInteger(0, sup_name, OBJPROP_WIDTH, 2);
+   ObjectSetInteger(0, sup_name, OBJPROP_STYLE, STYLE_SOLID);
+   ObjectSetString(0, sup_name, OBJPROP_TOOLTIP, "Current Support: " + DoubleToString(current_low, _Digits));
+   
+   // Draw Pivot (Mid-Level)
+   double pivot = (current_high + current_low + current_close) / 3;
+   string pivot_name = g_prefix + "Pivot_Current";
+   ObjectCreate(0, pivot_name, OBJ_HLINE, 0, 0, pivot);
+   ObjectSetInteger(0, pivot_name, OBJPROP_COLOR, PivotColor);
+   ObjectSetInteger(0, pivot_name, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, pivot_name, OBJPROP_STYLE, STYLE_DOT);
+   ObjectSetString(0, pivot_name, OBJPROP_TOOLTIP, "Pivot: " + DoubleToString(pivot, _Digits));
+}
+
+//+------------------------------------------------------------------+
+//| Identify and Draw Strong Support/Resistance Zones                |
+//+------------------------------------------------------------------+
+void IdentifyStrongZones(const double &high[], const double &low[]) {
+   // Collect swing highs and lows
+   int swingHighs = 0;
+   int swingLows = 0;
+   
+   for(int i = 2; i < LookbackPeriod - 2; i++) {
+      // Potential swing high
+      if(high[i] > high[i-1] && high[i] > high[i-2] && high[i] > high[i+1] && high[i] > high[i+2]) {
+         g_high_points[swingHighs++] = high[i];
+      }
+      
+      // Potential swing low
+      if(low[i] < low[i-1] && low[i] < low[i-2] && low[i] < low[i+1] && low[i] < low[i+2]) {
+         g_low_points[swingLows++] = low[i];
+      }
+   }
+   
+   // Consolidate nearby levels to identify strong zones
+   double zoneTolerance = 10 * _Point; // Adjust based on your timeframe
+   
+   // Process resistance zones
+   Zone resistanceZones[];
+   IdentifyZones(g_high_points, swingHighs, resistanceZones, zoneTolerance, false);
+   
+   // Process support zones
+   Zone supportZones[];
+   IdentifyZones(g_low_points, swingLows, supportZones, zoneTolerance, true);
+   
+   // Draw strong zones
+   DrawZones(resistanceZones, false);
+   DrawZones(supportZones, true);
+}
+
+//+------------------------------------------------------------------+
+//| Identify Zones from Price Points                                 |
+//+------------------------------------------------------------------+
+void IdentifyZones(double &pricePoints[], int count, Zone &zones[], double tolerance, bool isSupport) {
+   int zoneCount = 0;
+   
+   // Exit if no data
+   if(count <= 0) return;
+   
+   // Sort price points
+   ArrayResize(zones, count);
+   ArraySort(pricePoints);
+   if(!isSupport) {
+      // For resistance zones, we want descending order
+      // Need to reverse the array
+      for(int i = 0; i < count / 2; i++) {
+         double temp = pricePoints[i];
+         pricePoints[i] = pricePoints[count - 1 - i];
+         pricePoints[count - 1 - i] = temp;
+      }
+   }
+   
+   // First point is always a zone
+   zones[0].price = pricePoints[0];
+   zones[0].strength = 1;
+   zones[0].hits = 1;
+   zones[0].isSupport = isSupport;
+   zoneCount = 1;
+   
+   // Check remaining points
+   for(int i = 1; i < count; i++) {
+      bool foundZone = false;
+      
+      // Check if this point belongs to an existing zone
+      for(int j = 0; j < zoneCount; j++) {
+         if(MathAbs(pricePoints[i] - zones[j].price) <= tolerance) {
+            // Update zone with weighted average
+            double totalWeight = zones[j].hits + 1;
+            zones[j].price = ((zones[j].price * zones[j].hits) + pricePoints[i]) / totalWeight;
+            zones[j].hits++;
+            zones[j].strength = zones[j].hits;
+            foundZone = true;
+            break;
+         }
+      }
+      
+      // If no matching zone, create a new one
+      if(!foundZone && zoneCount < count) {
+         zones[zoneCount].price = pricePoints[i];
+         zones[zoneCount].strength = 1;
+         zones[zoneCount].hits = 1;
+         zones[zoneCount].isSupport = isSupport;
+         zoneCount++;
+      }
+   }
+   
+   // Resize array to actual zone count
+   ArrayResize(zones, zoneCount);
+}
+
+//+------------------------------------------------------------------+
+//| Draw Strong Zones                                                |
+//+------------------------------------------------------------------+
+void DrawZones(Zone &zones[], bool isSupport) {
+   int zoneThickness = 5; // Thickness in pips
+   double zoneSize = zoneThickness * _Point;
+   
+   for(int i = 0; i < ArraySize(zones); i++) {
+      // Only draw zones with more than 1 hit
+      if(zones[i].hits > 1) {
+         string objectName;
+         string zoneType = isSupport ? "Support" : "Resistance";
+         color zoneColor = isSupport ? SupportColor : ResistanceColor;
+         
+         // Create zone rectangle
+         objectName = g_prefix + zoneType + "_Zone_" + IntegerToString(i);
+         double upperLevel = zones[i].price + (isSupport ? 0 : zoneSize);
+         double lowerLevel = zones[i].price - (isSupport ? zoneSize : 0);
+         
+         // Get chart boundaries for rectangle
+         datetime startTime = TimeCurrent() - PeriodSeconds(PERIOD_CURRENT) * 50;
+         datetime endTime = TimeCurrent() + PeriodSeconds(PERIOD_CURRENT) * 50;
+         
+         ObjectCreate(0, objectName, OBJ_RECTANGLE, 0, 
+                     startTime, upperLevel, 
+                     endTime, lowerLevel);
+         
+         ObjectSetInteger(0, objectName, OBJPROP_COLOR, zoneColor);
+         ObjectSetInteger(0, objectName, OBJPROP_BACK, true);
+         ObjectSetInteger(0, objectName, OBJPROP_FILL, true);
+         
+         // Set fill color with transparency
+         uchar alpha = (uchar)ZoneOpacity;
+         color fillColor = zoneColor;
+         ObjectSetInteger(0, objectName, OBJPROP_BGCOLOR, fillColor);
+         ObjectSetInteger(0, objectName, OBJPROP_FILL, true);
+         
+         // Add label with hit count
+         string labelName = g_prefix + zoneType + "_Label_" + IntegerToString(i);
+         ObjectCreate(0, labelName, OBJ_TEXT, 0, 
+                     TimeCurrent() - PeriodSeconds(PERIOD_CURRENT) * 5, zones[i].price);
+         
+         ObjectSetString(0, labelName, OBJPROP_TEXT, 
+                        "strong " + zoneType + " (" + IntegerToString(zones[i].hits) + " hits)");
+         ObjectSetInteger(0, labelName, OBJPROP_COLOR, zoneColor);
+         ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 8);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Draw Higher Timeframe Support/Resistance Levels                  |
+//+------------------------------------------------------------------+
+void DrawHigherTimeframeLevels() {
+   // Draw HTF1 levels
+   DrawHTFLevels(HTF1, 1);
+   
+   // Draw HTF2 levels
+   DrawHTFLevels(HTF2, 2);
+}
+
+//+------------------------------------------------------------------+
+//| Draw Higher Timeframe Levels                                     |
+//+------------------------------------------------------------------+
+void DrawHTFLevels(ENUM_TIMEFRAMES timeframe, int htfIndex) {
+   // Get data from higher timeframe
+   double high[], low[], close[];
+   ArraySetAsSeries(high, true);
+   ArraySetAsSeries(low, true);
+   ArraySetAsSeries(close, true);
+   
+   // Copy price data
+   int copied = CopyHigh(NULL, timeframe, 0, LookbackPeriod, high);
+   if(copied <= 0) return;
+   
+   copied = CopyLow(NULL, timeframe, 0, LookbackPeriod, low);
+   if(copied <= 0) return;
+   
+   copied = CopyClose(NULL, timeframe, 0, 1, close);
+   if(copied <= 0) return;
+   
+   // Calculate HTF support/resistance
+   int high_idx = ArrayMaximum(high, 0, copied);
+   int low_idx = ArrayMinimum(low, 0, copied);
+   
+   double htf_high = high[high_idx];
+   double htf_low = low[low_idx];
+   double htf_close = close[0];
+   double htf_pivot = (htf_high + htf_low + htf_close) / 3;
+   
+   string tf_name = EnumToString(timeframe);
+   
+   // Draw HTF Resistance
+   string res_name = g_prefix + "HTF" + IntegerToString(htfIndex) + "_Resistance";
+   ObjectCreate(0, res_name, OBJ_HLINE, 0, 0, htf_high);
+   ObjectSetInteger(0, res_name, OBJPROP_COLOR, ResistanceColor);
+   ObjectSetInteger(0, res_name, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, res_name, OBJPROP_STYLE, STYLE_DASH);
+   ObjectSetString(0, res_name, OBJPROP_TOOLTIP, tf_name + " Resistance: " + DoubleToString(htf_high, _Digits));
+   
+   // Draw HTF Support
+   string sup_name = g_prefix + "HTF" + IntegerToString(htfIndex) + "_Support";
+   ObjectCreate(0, sup_name, OBJ_HLINE, 0, 0, htf_low);
+   ObjectSetInteger(0, sup_name, OBJPROP_COLOR, SupportColor);
+   ObjectSetInteger(0, sup_name, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, sup_name, OBJPROP_STYLE, STYLE_DASH);
+   ObjectSetString(0, sup_name, OBJPROP_TOOLTIP, tf_name + " Support: " + DoubleToString(htf_low, _Digits));
+   
+   // Draw HTF Pivot
+   string pivot_name = g_prefix + "HTF" + IntegerToString(htfIndex) + "_Pivot";
+   ObjectCreate(0, pivot_name, OBJ_HLINE, 0, 0, htf_pivot);
+   ObjectSetInteger(0, pivot_name, OBJPROP_COLOR, PivotColor);
+   ObjectSetInteger(0, pivot_name, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, pivot_name, OBJPROP_STYLE, STYLE_DOT);
+   ObjectSetString(0, pivot_name, OBJPROP_TOOLTIP, tf_name + " Pivot: " + DoubleToString(htf_pivot, _Digits));
+}
